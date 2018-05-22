@@ -37,6 +37,16 @@ func createSampleReplicaVolumeEntry(size int, replica int) *VolumeEntry {
 	return v
 }
 
+func createSampleDistributeOnlyVolumeEntry(size int) *VolumeEntry {
+	req := &api.VolumeCreateRequest{}
+	req.Size = size
+	req.Durability.Type = api.DurabilityDistributeOnly
+
+	v := NewVolumeEntryFromRequest(req)
+
+	return v
+}
+
 func setupSampleDbWithTopology(app *App,
 	clusters, nodes_per_cluster, devices_per_node int,
 	disksize uint64) error {
@@ -1559,7 +1569,7 @@ func TestVolumeEntryNameConflictMultiCluster(t *testing.T) {
 	tests.Assert(t, err != nil, err)
 }
 
-func TestReplaceBrickInVolume(t *testing.T) {
+func TestReplaceBrickInReplicatedVolume(t *testing.T) {
 	tmpfile := tests.Tempfile()
 	defer os.Remove(tmpfile)
 
@@ -1622,6 +1632,99 @@ func TestReplaceBrickInVolume(t *testing.T) {
 			NumberOfEntries: "0"}
 		bricks.BrickList = append(bricks.BrickList, brick)
 		brick = executors.BrickHealStatus{Name: brickNames[2],
+			NumberOfEntries: "0"}
+		bricks.BrickList = append(bricks.BrickList, brick)
+		h := &executors.HealInfo{
+			Bricks: bricks,
+		}
+		return h, nil
+	}
+	brickId := be.Id()
+	err = v.replaceBrickInVolume(app.db, app.executor, brickId)
+	tests.Assert(t, err == nil, err)
+
+	oldNode := be.Info.NodeId
+	brickOnOldNode := false
+	oldBrickIdExists := false
+
+	err = app.db.View(func(tx *bolt.Tx) error {
+
+		for _, brick := range v.Bricks {
+			be, err = NewBrickEntryFromId(tx, brick)
+			if err != nil {
+				return err
+			}
+			ne, err := NewNodeEntryFromId(tx, be.Info.NodeId)
+			if err != nil {
+				return err
+			}
+			if ne.Info.Id == oldNode {
+				brickOnOldNode = true
+			}
+			if be.Info.Id == brickId {
+				oldBrickIdExists = true
+			}
+		}
+		return nil
+	})
+
+	tests.Assert(t, !brickOnOldNode, "brick found on oldNode")
+	tests.Assert(t, !oldBrickIdExists, "old Brick not deleted")
+}
+
+func TestReplaceBrickInDistributeOnlyVolume(t *testing.T) {
+	tmpfile := tests.Tempfile()
+	defer os.Remove(tmpfile)
+
+	app := NewTestApp(tmpfile)
+	defer app.Close()
+
+	// Create a cluster in the database
+	err := setupSampleDbWithTopology(app,
+		1,      // clusters
+		4,      // nodes_per_cluster
+		1,      // devices_per_node,
+		500*GB, // disksize)
+	)
+	tests.Assert(t, err == nil)
+
+	v := createSampleDistributeOnlyVolumeEntry(100)
+
+	err = v.Create(app.db, app.executor)
+	tests.Assert(t, err == nil, err)
+	var brickNames []string
+	var be *BrickEntry
+	err = app.db.View(func(tx *bolt.Tx) error {
+
+		for _, brick := range v.Bricks {
+			be, err = NewBrickEntryFromId(tx, brick)
+			if err != nil {
+				return err
+			}
+			ne, err := NewNodeEntryFromId(tx, be.Info.NodeId)
+			if err != nil {
+				return err
+			}
+			brickName := fmt.Sprintf("%v:%v", ne.Info.Hostnames.Storage[0], be.Info.Path)
+			brickNames = append(brickNames, brickName)
+		}
+		return nil
+	})
+	app.xo.MockVolumeInfo = func(host string, volume string) (*executors.Volume, error) {
+		var bricks []executors.Brick
+		brick := executors.Brick{Name: brickNames[0]}
+		bricks = append(bricks, brick)
+		Bricks := executors.Bricks{
+			BrickList: bricks,
+		}
+		b := &executors.Volume{
+			Bricks: Bricks,
+		}
+		return b, nil
+	}
+	app.xo.MockHealInfo = func(host string, volume string) (*executors.HealInfo, error) {
+		var bricks executors.HealInfoBricks
+		brick := executors.BrickHealStatus{Name: brickNames[0],
 			NumberOfEntries: "0"}
 		bricks.BrickList = append(bricks.BrickList, brick)
 		h := &executors.HealInfo{

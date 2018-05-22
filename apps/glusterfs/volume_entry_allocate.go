@@ -186,7 +186,7 @@ func (v *VolumeEntry) canReplaceBrickInBrickSet(db wdb.DB,
 			}
 		}
 	}
-	if onlinePeerBrickCount < v.Durability.QuorumBrickCount() {
+	if v.Info.Durability.Type != api.DurabilityDistributeOnly && onlinePeerBrickCount < v.Durability.QuorumBrickCount() {
 		return fmt.Errorf("Cannot replace brick %v as only %v of %v "+
 			"required peer bricks are online",
 			brickId, onlinePeerBrickCount,
@@ -194,6 +194,12 @@ func (v *VolumeEntry) canReplaceBrickInBrickSet(db wdb.DB,
 	}
 
 	return nil
+}
+
+type brickItem struct {
+	brickEntry     *BrickEntry
+	deviceEntry    *DeviceEntry
+	brickNodeEntry *NodeEntry
 }
 
 type replacementItems struct {
@@ -262,6 +268,52 @@ func (v *VolumeEntry) prepForBrickReplacement(db wdb.DB,
 	return
 }
 
+func (v *VolumeEntry) prepForBrickRemoval(db wdb.DB,
+	executor executors.Executor,
+	oldBrickId string) (bi brickItem, node string, err error) {
+
+	var oldBrickEntry *BrickEntry
+	var oldDeviceEntry *DeviceEntry
+	var oldBrickNodeEntry *NodeEntry
+
+	err = db.View(func(tx *bolt.Tx) error {
+		var err error
+		oldBrickEntry, err = NewBrickEntryFromId(tx, oldBrickId)
+		if err != nil {
+			return err
+		}
+
+		oldDeviceEntry, err = NewDeviceEntryFromId(tx, oldBrickEntry.Info.DeviceId)
+		if err != nil {
+			return err
+		}
+		oldBrickNodeEntry, err = NewNodeEntryFromId(tx, oldBrickEntry.Info.NodeId)
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		return
+	}
+
+	node = oldBrickNodeEntry.ManageHostName()
+	err = executor.GlusterdCheck(node)
+	if err != nil {
+		node, err = GetVerifiedManageHostname(db, executor, oldBrickNodeEntry.Info.ClusterId)
+		if err != nil {
+			return
+		}
+	}
+
+	bi = brickItem{
+		brickEntry:     oldBrickEntry,
+		deviceEntry:    oldDeviceEntry,
+		brickNodeEntry: oldBrickNodeEntry,
+	}
+	return
+}
+
 func (v *VolumeEntry) allocBrickReplacement(db wdb.DB,
 	oldBrickEntry *BrickEntry,
 	oldDeviceEntry *DeviceEntry,
@@ -307,10 +359,6 @@ func (v *VolumeEntry) allocBrickReplacement(db wdb.DB,
 func (v *VolumeEntry) replaceBrickInVolume(db wdb.DB, executor executors.Executor,
 	oldBrickId string) (e error) {
 
-	if api.DurabilityDistributeOnly == v.Info.Durability.Type {
-		return fmt.Errorf("replace brick is not supported for volume durability type %v", v.Info.Durability.Type)
-	}
-
 	ri, node, err := v.prepForBrickReplacement(
 		db, executor, oldBrickId)
 	if err != nil {
@@ -354,6 +402,15 @@ func (v *VolumeEntry) replaceBrickInVolume(db wdb.DB, executor executors.Executo
 		return err
 	}
 
+	newNode := newBrickNodeEntry.ManageHostName()
+	err = executor.GlusterdCheck(newNode)
+	if err != nil {
+		newNode, err = GetVerifiedManageHostname(db, executor, newBrickNodeEntry.Info.ClusterId)
+		if err != nil {
+			return err
+		}
+	}
+
 	brickEntries := []*BrickEntry{newBrickEntry}
 	err = CreateBricks(db, executor, brickEntries)
 	if err != nil {
@@ -374,9 +431,22 @@ func (v *VolumeEntry) replaceBrickInVolume(db wdb.DB, executor executors.Executo
 	newBrick.Path = newBrickEntry.Info.Path
 	newBrick.Host = newBrickNodeEntry.StorageHostName()
 
-	err = executor.VolumeReplaceBrick(node, v.Info.Name, &oldBrick, &newBrick)
-	if err != nil {
-		return err
+	if v.Info.Durability.Type == api.DurabilityDistributeOnly {
+		// For Distribute volume add the new brick and then remove old one
+		err = executor.VolumeAddBrick(newNode, v.Info.Name, &newBrick)
+		if err != nil {
+			return err
+		}
+
+		err = executor.VolumeRemoveBrick(node, v.Info.Name, &oldBrick, 0)
+		if err != nil {
+			return err
+		}
+	} else {
+		err = executor.VolumeReplaceBrick(node, v.Info.Name, &oldBrick, &newBrick)
+		if err != nil {
+			return err
+		}
 	}
 
 	// After this point we should not call any defer func()
@@ -438,6 +508,76 @@ func (v *VolumeEntry) replaceBrickInVolume(db wdb.DB, executor executors.Executo
 	logger.Info("replaced brick:%v on node:%v at path:%v with brick:%v on node:%v at path:%v",
 		oldBrickEntry.Id(), oldBrickEntry.Info.NodeId, oldBrickEntry.Info.Path,
 		newBrickEntry.Id(), newBrickEntry.Info.NodeId, newBrickEntry.Info.Path)
+	return nil
+}
+
+func (v *VolumeEntry) removeBrickFromVolume(db wdb.DB, executor executors.Executor, oldBrickId string) (e error) {
+	if api.DurabilityReplicate != v.Info.Durability.Type {
+		return fmt.Errorf("remove brick is allowed for volume durability type %v", v.Info.Durability.Type)
+	}
+
+	if v.Info.Durability.Replicate.Replica <= 1 {
+		return fmt.Errorf("replica count can't be reduced lower than %d", 1)
+	}
+
+	bi, node, err := v.prepForBrickRemoval(db, executor, oldBrickId)
+	if err != nil {
+		return err
+	}
+
+	brickEntry := bi.brickEntry
+	brickNodeEntry := bi.brickNodeEntry
+
+	var oldBrick executors.BrickInfo
+	oldBrick.Path = brickEntry.Info.Path
+	oldBrick.Host = brickNodeEntry.StorageHostName()
+
+	// Remove brick reducing replica count
+	replica := v.Info.Durability.Replicate.Replica - 1
+	err = executor.VolumeRemoveBrick(node, v.Info.Name, &oldBrick, replica)
+	if err != nil {
+		return err
+	}
+
+	spaceReclaimed, err := brickEntry.Destroy(db, executor)
+	if err != nil {
+		logger.LogError("Error destroying brick: %v", err)
+	}
+
+	err = db.Update(func(tx *bolt.Tx) error {
+		if spaceReclaimed {
+			reReadDeviceEntry, err := NewDeviceEntryFromId(tx, brickEntry.Info.DeviceId)
+			if err != nil {
+				return err
+			}
+			reReadDeviceEntry.StorageFree(brickEntry.TotalSize())
+			err = reReadDeviceEntry.Save(tx)
+			if err != nil {
+				return err
+			}
+		}
+
+		reReadVolEntry, err := NewVolumeEntryFromId(tx, brickEntry.Info.VolumeId)
+		if err != nil {
+			return err
+		}
+		err = reReadVolEntry.removeBrickFromDb(tx, brickEntry)
+		if err != nil {
+			return err
+		}
+		err = reReadVolEntry.Save(tx)
+		if err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		logger.Err(err)
+	}
+
+	logger.Info("removed brick:%v from node:%v at path:%v",
+		brickEntry.Id(), brickEntry.Info.NodeId, brickEntry.Info.Path)
+
 	return nil
 }
 
