@@ -188,12 +188,12 @@ func (v *VolumeEntry) canReplaceBrickInBrickSet(db wdb.DB,
 				}
 			}
 		}
-		if onlinePeerBrickCount < v.Durability.QuorumBrickCount() {
-			return fmt.Errorf("Cannot replace brick %v as only %v of %v "+
-				"required peer bricks are online",
-				brickId, onlinePeerBrickCount,
-				v.Durability.QuorumBrickCount())
-		}
+		//if onlinePeerBrickCount < v.Durability.QuorumBrickCount() {
+		//	return fmt.Errorf("Cannot replace brick %v as only %v of %v "+
+		//		"required peer bricks are online",
+		//		brickId, onlinePeerBrickCount,
+		//		v.Durability.QuorumBrickCount())
+		//}
 	}
 
 	return nil
