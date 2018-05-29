@@ -565,6 +565,7 @@ func (v *VolumeEntry) removeBrickFromVolume(db wdb.DB, executor executors.Execut
 			return err
 		}
 		reReadVolEntry.Info.Durability.Replicate.Replica = replica
+		reReadVolEntry.Durability = NewVolumeReplicaDurability(&reReadVolEntry.Info.Durability.Replicate)
 		err = reReadVolEntry.removeBrickFromDb(tx, brickEntry)
 		if err != nil {
 			return err

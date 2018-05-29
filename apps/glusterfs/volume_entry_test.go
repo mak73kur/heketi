@@ -2318,6 +2318,7 @@ func TestRemoveBrickFromReplicatedVolumeReducingReplicaCount(t *testing.T) {
 	})
 
 	tests.Assert(t, v.Info.Durability.Replicate.Replica == 2, "expected Replica == 2, got:", v.Info.Durability.Replicate.Replica)
+	tests.Assert(t, v.Durability.BricksInSet() == 2, "expected BricksInSet == 2, got:", v.Info.Durability.Replicate.Replica)
 	tests.Assert(t, !brickOnOldNode, "brick found on oldNode")
 	tests.Assert(t, !oldBrickIdExists, "old Brick not deleted")
 }

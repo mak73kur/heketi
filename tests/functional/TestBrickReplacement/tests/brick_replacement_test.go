@@ -11,8 +11,8 @@
 package functional
 
 import (
-	"testing"
 	"strings"
+	"testing"
 
 	"github.com/heketi/heketi/pkg/glusterfs/api"
 	"github.com/heketi/tests"
